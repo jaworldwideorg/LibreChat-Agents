@@ -84,6 +84,7 @@ import { createRemoveAllMessage } from '@/messages/reducer';
 import { getProviderFamily } from '@/llm/providerRegistry';
 import { getProviderStopReasons } from '@/llm/truncation';
 import { isProviderCancellation } from '@/utils/errors';
+import { isReasoningModel } from '@/llm/openai/utils';
 import { initializeModel } from '@/llm/init';
 import { getChunkContent } from '@/stream';
 import { executeHooks } from '@/hooks';
@@ -248,7 +249,12 @@ function readSummaryOutputLimit(
 ): number | undefined {
   const openai = usesCompletionTokenAlias(provider);
   const native = (openai ? options.modelKwargs : options.invocationKwargs) as
-    | { max_output_tokens?: number; max_tokens?: number }
+    | {
+        model?: string;
+        max_output_tokens?: number;
+        max_completion_tokens?: number;
+        max_tokens?: number;
+      }
     | undefined;
   const anthropic =
     provider === Providers.ANTHROPIC ||
@@ -257,9 +263,14 @@ function readSummaryOutputLimit(
   let nativeLimit: number | undefined;
   if (openai) nativeLimit = native?.max_output_tokens;
   else if (anthropic) nativeLimit = native?.max_tokens;
+  const aliasedCompletionLimit =
+    openai && native?.model != null && !isReasoningModel(native.model)
+      ? native.max_completion_tokens
+      : undefined;
   return (nativeLimit ??
     (openai ? options.maxCompletionTokens : undefined) ??
-    options[getMaxOutputTokensKey(provider)]) as number | undefined;
+    options[getMaxOutputTokensKey(provider)] ??
+    aliasedCompletionLimit) as number | undefined;
 }
 
 function clearSummaryOutputLimits(
