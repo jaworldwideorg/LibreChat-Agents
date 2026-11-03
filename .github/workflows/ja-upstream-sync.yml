@@ -37,6 +37,8 @@ jobs:
       - name: Prepare upstream merge
         id: merge
         run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           mkdir -p "$RUNNER_TEMP/agents-audit-baseline"
           cp package.json package-lock.json "$RUNNER_TEMP/agents-audit-baseline/"
           bash scripts/ja-upstream-sync.sh
@@ -79,8 +81,6 @@ jobs:
       - name: Publish tested merge to fork main
         if: steps.merge.outputs.changed == 'true'
         run: |
-          git config user.name 'github-actions[bot]'
-          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m 'chore: sync tested upstream agents main'
           git push origin HEAD:refs/heads/main
       - name: Record verified refs
