@@ -660,10 +660,14 @@ function createAgentInputFromGraphConfig(
     ...(instructions != null && instructions !== ''
       ? { prompt: instructions }
       : {}),
-    retainRecent: {
-      ...(agent.summarizationConfig?.retainRecent ?? {}),
-      ...(retainRecentTurns != null ? { turns: retainRecentTurns } : {}),
-    },
+    ...(retainRecentTurns != null
+      ? {
+        retainRecent: {
+          ...agent.summarizationConfig?.retainRecent,
+          turns: retainRecentTurns,
+        },
+      }
+      : {}),
   };
   return {
     ...applyInitialSummaryToAgent(agent, initialSummary),
@@ -1720,7 +1724,9 @@ export class AgentSession {
         options.retainRecentTurns,
         options.instructions
       ),
-      this.runConfig.tokenCounter
+      this.runConfig.tokenCounter,
+      undefined,
+      this.runConfig.toolExecution
     );
     const graph = createManualCompactGraph({
       runId: compactRunId,
@@ -1765,13 +1771,8 @@ export class AgentSession {
       throw error;
     }
     await graph.closeOpenSteps('completed');
-    const completedSummaryText = getSummaryText(graph.completedSummary);
-    const contextSummaryText = agentContext.getSummaryText();
-    let summaryText = completedSummaryText;
-    if (summaryText === '' && contextSummaryText != null) {
-      summaryText = contextSummaryText;
-    }
-    if (summaryText === '') {
+    const summaryText = getSummaryText(graph.completedSummary);
+    if (summaryText === '' || summarizedState.messages == null) {
       return undefined;
     }
     const retainedMessages = filterRemoveMessages(

@@ -1,0 +1,93 @@
+name: JA daily upstream sync
+
+on:
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/ja-upstream-sync.yml'
+      - 'scripts/ja-upstream-sync*'
+      - 'docs/ja-upstream-sync.md'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ja-agents-upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    if: github.repository == 'jaworldwideorg/agents'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.1'
+          cache: npm
+      - name: Prepare upstream merge
+        id: merge
+        run: |
+          mkdir -p "$RUNNER_TEMP/agents-audit-baseline"
+          cp package.json package-lock.json "$RUNNER_TEMP/agents-audit-baseline/"
+          bash scripts/ja-upstream-sync.sh
+      - name: Install locked dependencies
+        if: steps.merge.outputs.changed == 'true' || github.event_name != 'schedule'
+        run: npm ci --no-audit --no-fund
+      - name: Verify workflow and sync contracts
+        if: steps.merge.outputs.changed == 'true' || github.event_name != 'schedule'
+        run: |
+          node --test config/workflow-syntax.test.mjs
+          node --test scripts/ja-upstream-audit.test.mjs
+          python3 scripts/ja-upstream-sync.test.py
+      - name: Build and typecheck
+        if: steps.merge.outputs.changed == 'true' || github.event_name != 'schedule'
+        run: |
+          npm run build
+          npx tsc --noEmit
+      - name: Reject newly introduced audit findings
+        if: steps.merge.outputs.changed == 'true' || github.event_name != 'schedule'
+        run: |
+          (cd "$RUNNER_TEMP/agents-audit-baseline" && npm audit --package-lock-only --json > baseline-audit.json) || test "$?" -eq 1
+          npm audit --package-lock-only --json > candidate-audit.json || test "$?" -eq 1
+          node scripts/ja-upstream-audit.mjs "$RUNNER_TEMP/agents-audit-baseline/baseline-audit.json" candidate-audit.json
+      - name: Check source and package boundaries
+        if: steps.merge.outputs.changed == 'true' || github.event_name != 'schedule'
+        run: |
+          npx eslint src/
+          npm run test:circular-deps
+          npm run check:circular-deps
+          npm run test:light-entries
+          npm run test:typecheck
+      - name: Run unit tests
+        if: steps.merge.outputs.changed == 'true' || github.event_name != 'schedule'
+        env:
+          NODE_OPTIONS: '--experimental-vm-modules'
+          NODE_ENV: test
+        run: >-
+          npx jest --ci --maxWorkers=2
+          --testPathIgnorePatterns='title.memory-leak.test.ts|llm.spec.ts|integration.test.ts|specs/summarization.test.ts|\.live\.test\.ts$'
+      - name: Publish tested merge to fork main
+        if: steps.merge.outputs.changed == 'true'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'chore: sync tested upstream agents main'
+          git push origin HEAD:refs/heads/main
+      - name: Record verified refs
+        if: success()
+        env:
+          UPSTREAM_SHA: ${{ steps.merge.outputs.upstream_sha }}
+          MERGE_CHANGED: ${{ steps.merge.outputs.changed }}
+        run: |
+          printf 'Upstream: `%s`\n\nFork main: `%s`\n\nMerged: `%s`\n' \
+            "$UPSTREAM_SHA" "$(git rev-parse HEAD)" "$MERGE_CHANGED" >> "$GITHUB_STEP_SUMMARY"
