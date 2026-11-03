@@ -91,3 +91,12 @@ jobs:
         run: |
           printf 'Upstream: `%s`\n\nFork main: `%s`\n\nMerged: `%s`\n' \
             "$UPSTREAM_SHA" "$(git rev-parse HEAD)" "$MERGE_CHANGED" >> "$GITHUB_STEP_SUMMARY"
+      - name: Save audit comparison evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agents-sync-audit-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/agents-audit-baseline/baseline-audit.json
+            candidate-audit.json
+          if-no-files-found: ignore
