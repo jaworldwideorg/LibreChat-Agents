@@ -39,8 +39,7 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          mkdir -p "$RUNNER_TEMP/agents-audit-baseline"
-          cp package.json package-lock.json "$RUNNER_TEMP/agents-audit-baseline/"
+          git worktree add --detach "$RUNNER_TEMP/agents-audit-baseline" HEAD
           bash scripts/ja-upstream-sync.sh
       - name: Install locked dependencies
         if: steps.merge.outputs.changed == 'true' || github.event_name != 'schedule'
