@@ -59,6 +59,7 @@ jobs:
       - name: Reject newly introduced audit findings
         if: steps.merge.outputs.changed == 'true' || github.event_name != 'schedule'
         run: |
+          (cd "$RUNNER_TEMP/agents-audit-baseline" && npm ci --ignore-scripts --no-audit --no-fund)
           (cd "$RUNNER_TEMP/agents-audit-baseline" && npm audit --package-lock-only --json > baseline-audit.json) || test "$?" -eq 1
           npm audit --package-lock-only --json > candidate-audit.json || test "$?" -eq 1
           node scripts/ja-upstream-audit.mjs "$RUNNER_TEMP/agents-audit-baseline/baseline-audit.json" candidate-audit.json
