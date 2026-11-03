@@ -29,6 +29,10 @@ const introduced = [...candidate].filter(([name, value]) => {
     value.direct.some((id) => !previous.direct.includes(id))
   );
 });
+console.log(`Audit comparison: ${baseline.size} baseline packages, ${candidate.size} candidate packages`);
+if (introduced.length) {
+  console.log(`Audit changes requiring review: ${introduced.map(([name]) => name).join(', ')}`);
+}
 assert.equal(
   introduced.length,
   0,
