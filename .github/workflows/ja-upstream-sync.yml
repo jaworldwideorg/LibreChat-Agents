@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   sync:
-    if: github.repository == 'jaworldwideorg/agents'
+    if: github.repository == 'jaworldwideorg/LibreChat-Agents'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     permissions:
