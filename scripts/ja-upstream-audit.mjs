@@ -12,21 +12,47 @@ function findings(filename) {
       Object.hasOwn(severity, value.severity) && Array.isArray(value.via)
     );
     const direct = value.via
-      .map((entry) => (typeof entry === 'string' ? entry : entry.source))
+      .filter((entry) => typeof entry === 'object')
+      .map((entry) => entry.url ?? entry.source)
       .sort();
-    result.set(name, { severity: value.severity, direct });
+    const references = value.via.filter((entry) => typeof entry === 'string');
+    result.set(name, {
+      severity: value.severity,
+      direct,
+      references,
+      nodes: value.nodes ?? [],
+    });
   }
   return result;
 }
 
 const baseline = findings(process.argv[2]);
 const candidate = findings(process.argv[3]);
+const baselineLock = JSON.parse(fs.readFileSync(process.argv[4], 'utf8'));
+const candidateLock = JSON.parse(fs.readFileSync(process.argv[5], 'utf8'));
+assert.ok(baselineLock.packages && candidateLock.packages);
+
+function unchangedNodes(value) {
+  return (
+    value.nodes.length > 0 &&
+    value.nodes.every((node) => {
+      const old = baselineLock.packages[node];
+      const current = candidateLock.packages[node];
+      return old && current && JSON.stringify(old) === JSON.stringify(current);
+    })
+  );
+}
+
 const introduced = [...candidate].filter(([name, value]) => {
   const previous = baseline.get(name);
+  if (!previous) {
+    return value.direct.length > 0 || !unchangedNodes(value);
+  }
   return (
-    !previous ||
     severity[value.severity] > severity[previous.severity] ||
-    value.direct.some((id) => !previous.direct.includes(id))
+    value.direct.some((id) => !previous.direct.includes(id)) ||
+    (value.references.some((name) => !previous.references.includes(name)) &&
+      !unchangedNodes(value))
   );
 });
 console.log(
