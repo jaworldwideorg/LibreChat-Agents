@@ -11,6 +11,8 @@ The GitHub token has only repository content-write permission in this job;
 non-fast-forward pushes are rejected normally. Source verification runs inside
 the sync workflow because GitHub-token pushes do not trigger another Actions run.
 
+Candidate files pass the repository's staged-file formatting hook before verification. Publication checks that the committed Git tree matches the validated staged tree, so a commit hook cannot publish additional untested changes. Source conflicts still stop the automatic merge; the fallback resolves them only after inspecting the fork and upstream changes.
+
 The upstream npm publisher is restricted to `LibreChat-AI/agents`; this fork's
 sync neither publishes npm packages nor deploys production services.
 `fixes/mcp-ptc-delivery` retains the separate attachment-delivery work and is

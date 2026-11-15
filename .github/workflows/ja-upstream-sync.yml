@@ -44,6 +44,9 @@ jobs:
       - name: Install locked dependencies
         if: steps.merge.outputs.changed == 'true' || github.event_name != 'schedule'
         run: npm ci --no-audit --no-fund
+      - name: Format candidate before verification
+        if: steps.merge.outputs.changed == 'true'
+        run: npx lint-staged
       - name: Verify workflow and sync contracts
         if: steps.merge.outputs.changed == 'true' || github.event_name != 'schedule'
         run: |
@@ -81,7 +84,10 @@ jobs:
       - name: Publish tested merge to fork main
         if: steps.merge.outputs.changed == 'true'
         run: |
+          git diff --quiet
+          validated_tree="$(git write-tree)"
           git commit -m 'chore: sync tested upstream agents main'
+          test "$(git rev-parse HEAD^{tree})" = "$validated_tree"
           git push origin HEAD:refs/heads/main
       - name: Record verified refs
         if: success()

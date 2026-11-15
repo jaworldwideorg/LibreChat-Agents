@@ -2682,6 +2682,9 @@ export function createContentAggregator(): t.ContentAggregatorResult {
         console.warn('No run step found for summarize delta event');
         return;
       }
+      if (deltaData.reset === true) {
+        contentParts[runStep.index] = { type: ContentTypes.SUMMARY };
+      }
       updateContent(runStep.index, deltaData.delta.summary);
       return;
     }

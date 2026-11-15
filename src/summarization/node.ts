@@ -86,7 +86,6 @@ import { getProviderStopReasons } from '@/llm/truncation';
 import { isProviderCancellation } from '@/utils/errors';
 import { isReasoningModel } from '@/llm/openai/utils';
 import { initializeModel } from '@/llm/init';
-import { getChunkContent } from '@/stream';
 import { executeHooks } from '@/hooks';
 
 /** Maximum number of tool failures to include in the enrichment section. */
@@ -626,23 +625,49 @@ async function prepareSummarizationBudget({
   return { count, system, budget };
 }
 
-async function flushSummarizationDeltas(
-  deltas: t.SummarizeDeltaEvent[],
-  config?: RunnableConfig,
-  graph?: { getBreakerSignal?: () => AbortSignal }
-): Promise<void> {
-  const signal = withBreakerSignal(config, graph)?.signal;
-  signal?.throwIfAborted();
-  for (const delta of deltas) {
-    signal?.throwIfAborted();
-    if (config != null)
+/**
+ * What one summarization round has streamed. Deltas go out as the provider
+ * produces them, so an attempt that is then abandoned has already published
+ * text that is not the summary. `abandon` marks that text stale: the next delta
+ * to go out says to replace it, and `retract` withdraws it when none follows.
+ */
+export type SummaryDeltaStream = {
+  /** Call once per outgoing delta; true when it must replace what was streamed. */
+  next(): boolean;
+  abandon(): void;
+  retract(config?: RunnableConfig): Promise<void>;
+};
+
+export function createSummaryDeltaStream(stepId?: string): SummaryDeltaStream {
+  let streamed = false;
+  let stale = false;
+  return {
+    next(): boolean {
+      const reset = stale;
+      stale = false;
+      streamed = true;
+      return reset;
+    },
+    abandon(): void {
+      stale = streamed;
+    },
+    async retract(config?: RunnableConfig): Promise<void> {
+      if (!stale || stepId == null || stepId === '' || config == null) {
+        return;
+      }
+      stale = false;
+      streamed = false;
       await safeDispatchCustomEvent(
         GraphEvents.ON_SUMMARIZE_DELTA,
-        delta,
+        {
+          id: stepId,
+          reset: true,
+          delta: { summary: { type: ContentTypes.SUMMARY, content: [] } },
+        } satisfies t.SummarizeDeltaEvent,
         config
       );
-  }
-  signal?.throwIfAborted();
+    },
+  };
 }
 
 /**
@@ -893,27 +918,53 @@ function describeFallbackError(
  * Runs the summarization LLM call with primary + fallback providers,
  * preserving history when every provider fails.
  */
-async function executeSummarizationWithFallback(params: {
-  agentContext: AgentContext;
-  messages: BaseMessage[];
-  requiredHeadLength: number;
-  clientConfig: SummarizationClientConfig;
-  summarizeConfig?: RunnableConfig;
-  stepId: string;
-  usePromptCache: boolean;
-  shrinkInput?: boolean;
-  semanticIndex: RenderedCompactionSemanticIndex;
-  log: LogFn;
-  onUsage: (attempt: t.SummarizationAttemptUsage) => void;
-  /** Carries the run's stream limits so the event cap covers summary streams. */
-  graph?: StreamLimitState & {
-    getBreakerSignal?: () => AbortSignal;
-    getToolsForBinding?: (
-      provider: t.ProviderName,
-      clientOptions: t.ClientOptions | undefined
-    ) => t.GraphTools | undefined;
-  };
-}): Promise<{
+/**
+ * Runs the round and settles what it streamed: when the round ends without a
+ * summary, or with one that came from an attempt that did not stream, the text
+ * an earlier attempt published is withdrawn before the result is reported.
+ */
+async function executeSummarizationWithFallback(
+  params: Parameters<typeof runSummarizationAttempts>[0]
+): ReturnType<typeof runSummarizationAttempts> {
+  const deltas = createSummaryDeltaStream(params.stepId);
+  try {
+    const result = await runSummarizationAttempts(params, deltas);
+    if (result.text === '') {
+      deltas.abandon();
+    }
+    return result;
+  } catch (error) {
+    deltas.abandon();
+    throw error;
+  } finally {
+    await deltas.retract(params.summarizeConfig);
+  }
+}
+
+async function runSummarizationAttempts(
+  params: {
+    agentContext: AgentContext;
+    messages: BaseMessage[];
+    requiredHeadLength: number;
+    clientConfig: SummarizationClientConfig;
+    summarizeConfig?: RunnableConfig;
+    stepId: string;
+    usePromptCache: boolean;
+    shrinkInput?: boolean;
+    semanticIndex: RenderedCompactionSemanticIndex;
+    log: LogFn;
+    onUsage: (attempt: t.SummarizationAttemptUsage) => void;
+    /** Carries the run's stream limits so the event cap covers summary streams. */
+    graph?: StreamLimitState & {
+      getBreakerSignal?: () => AbortSignal;
+      getToolsForBinding?: (
+        provider: t.ProviderName,
+        clientOptions: t.ClientOptions | undefined
+      ) => t.GraphTools | undefined;
+    };
+  },
+  deltas: SummaryDeltaStream
+): Promise<{
   text: string;
   usage?: Partial<UsageMetadata>;
   provider: string;
@@ -1001,8 +1052,8 @@ async function executeSummarizationWithFallback(params: {
           config: summarizeConfig,
           stepId,
           provider: clientConfig.provider,
-          reasoningKey: agentContext.reasoningKey,
           graph,
+          deltas,
           usePromptCache,
           promptCacheTtl:
             clientConfig.provider === Providers.ANTHROPIC ||
@@ -1065,6 +1116,7 @@ async function executeSummarizationWithFallback(params: {
     }
 
     withBreakerSignal(summarizeConfig, graph)?.signal?.throwIfAborted();
+    deltas.abandon();
     errorCode = classifySummarizationError(primaryError);
 
     const primaryDescribed = describeProviderError(
@@ -1110,13 +1162,11 @@ async function executeSummarizationWithFallback(params: {
           } as t.FallbackConfig;
         });
         let fallbackIdentity: { provider: string; model?: string } | undefined;
-        const pendingDeltas: t.SummarizeDeltaEvent[] = [];
         const onChunk = createSummarizationChunkHandler({
-          pendingDeltas,
+          deltas,
           stepId,
           config: traceConfig(summarizeConfig, 'cache_hit_compaction'),
           provider: clientConfig.provider,
-          reasoningKey: agentContext.reasoningKey,
           graph,
         });
         const fallbackTools = agentContext.getToolsForBinding();
@@ -1134,7 +1184,7 @@ async function executeSummarizationWithFallback(params: {
             config,
           }) => {
             config?.signal?.throwIfAborted();
-            pendingDeltas.length = 0;
+            deltas.abandon();
             const instruction = buildSummarizationInstruction(
               clientConfig.promptText,
               clientConfig.updatePromptText,
@@ -1204,7 +1254,7 @@ async function executeSummarizationWithFallback(params: {
           invokeModel: (params, config) =>
             withSummarizationRetry(
               async () => {
-                pendingDeltas.length = 0;
+                deltas.abandon();
                 const result = await attemptInvoke(
                   {
                     ...params,
@@ -1246,11 +1296,6 @@ async function executeSummarizationWithFallback(params: {
               });
             summaryProvider = fallbackIdentity.provider;
             summaryModel = fallbackIdentity.model;
-            await flushSummarizationDeltas(
-              pendingDeltas,
-              summarizeConfig,
-              graph
-            );
           }
         }
       } catch (fbErr) {
@@ -1267,6 +1312,7 @@ async function executeSummarizationWithFallback(params: {
           throw fbErr;
         }
         withBreakerSignal(summarizeConfig, graph)?.signal?.throwIfAborted();
+        deltas.abandon();
         errorCode = classifySummarizationError(fbErr);
         const fbDescribed = describeFallbackError(fbErr, fallbacks);
         log('warn', `Fallback providers also failed ${fbDescribed.suffix}`, {
@@ -2081,10 +2127,16 @@ export function createSummarizeNode({
 }
 
 /** Extracts text from an LLM response, skipping reasoning/thinking blocks. */
-function extractResponseText(response: { content: string | object }): string {
-  const { content } = response;
+/** A streamed chunk's text block is `text_delta` from Anthropic, `text` elsewhere. */
+const CHUNK_TEXT_TYPES: readonly string[] = ['text', 'text_delta'];
+
+/** The text a response or one streamed chunk carries, reasoning left out. */
+function collectText(
+  content: unknown,
+  textTypes: readonly string[] = ['text']
+): string {
   if (typeof content === 'string') {
-    return content.trim();
+    return content;
   }
   if (!Array.isArray(content)) {
     return '';
@@ -2106,11 +2158,19 @@ function extractResponseText(response: { content: string | object }): string {
     ) {
       continue;
     }
-    if (rec.type === 'text' && typeof rec.text === 'string') {
+    if (
+      typeof rec.type === 'string' &&
+      textTypes.includes(rec.type) &&
+      typeof rec.text === 'string'
+    ) {
       parts.push(rec.text);
     }
   }
-  return parts.join('').trim();
+  return parts.join('');
+}
+
+function extractResponseText(response: { content: string | object }): string {
+  return collectText(response.content).trim();
 }
 
 class ToolOnlySummaryError extends ReasoningOnlySummaryError {
@@ -2190,34 +2250,38 @@ function isReasoningOnlySummary(response: BaseMessage): boolean {
   return hasReasoning;
 }
 
-/** Creates an `onChunk` callback that dispatches `ON_SUMMARIZE_DELTA` events for streaming. */
+/**
+ * Creates an `onChunk` callback that dispatches each chunk as an
+ * `ON_SUMMARIZE_DELTA` while the provider is still responding. With `deltas`,
+ * a chunk from a new attempt replaces what an earlier attempt streamed.
+ */
 export function createSummarizationChunkHandler({
   stepId,
   config,
   provider,
-  reasoningKey = 'reasoning_content',
   graph,
-  pendingDeltas,
+  deltas,
 }: {
   stepId?: string;
   config?: RunnableConfig;
   provider?: t.ProviderName;
+  /** @deprecated Not read: a delta carries summary text, never reasoning. */
   reasoningKey?: 'reasoning_content' | 'reasoning';
   graph?: StreamLimitState & { getBreakerController?: () => AbortController };
-  pendingDeltas?: t.SummarizeDeltaEvent[];
+  deltas?: SummaryDeltaStream;
 }): OnChunk | undefined {
   if (stepId == null || stepId === '' || !config) {
     return undefined;
   }
   const limitMetadata = config.metadata as Record<string, unknown> | undefined;
-  let bufferedAttempt: unknown;
+  let streamingAttempt: unknown;
   return (chunk, attemptMetadata) => {
     if (
-      pendingDeltas != null &&
-      bufferedAttempt !== attemptMetadata?.[STREAM_LIMIT_ATTEMPT_KEY]
+      deltas != null &&
+      streamingAttempt !== attemptMetadata?.[STREAM_LIMIT_ATTEMPT_KEY]
     ) {
-      pendingDeltas.length = 0;
-      bufferedAttempt = attemptMetadata?.[STREAM_LIMIT_ATTEMPT_KEY];
+      deltas.abandon();
+      streamingAttempt = attemptMetadata?.[STREAM_LIMIT_ATTEMPT_KEY];
     }
     /**
      * Charged as `producer` so it PAIRS with the run's registered stream
@@ -2258,26 +2322,26 @@ export function createSummarizationChunkHandler({
       config.signal
     );
     if (protectionTrip != null) throw protectionTrip;
-    const chunkAny = chunk as Parameters<typeof getChunkContent>[0]['chunk'];
     const servingProvider =
       (attemptMetadata?.[Constants.INVOKED_PROVIDER] as
         | t.ProviderName
         | undefined) ?? provider;
-    const raw = getChunkContent({
-      chunk: chunkAny,
-      provider: servingProvider,
-      reasoningKey,
-    });
-    if (raw == null || (typeof raw === 'string' && !raw)) {
+    /**
+     * Summary text only. A chunk of reasoning is not part of the summary, and
+     * a response that turns out to be nothing but reasoning is retried, so
+     * publishing it here would show the model's thinking as the summary.
+     */
+    const text = collectText(chunk.content, CHUNK_TEXT_TYPES);
+    if (text === '') {
       return;
     }
-    const contentBlocks: t.MessageContentComplex[] =
-      typeof raw === 'string'
-        ? [{ type: ContentTypes.TEXT, text: raw } as t.MessageContentComplex]
-        : raw;
+    const contentBlocks: t.MessageContentComplex[] = [
+      { type: ContentTypes.TEXT, text } as t.MessageContentComplex,
+    ];
 
     const event: t.SummarizeDeltaEvent = {
       id: stepId,
+      ...(deltas?.next() === true ? { reset: true } : {}),
       delta: {
         summary: {
           type: ContentTypes.SUMMARY,
@@ -2293,11 +2357,12 @@ export function createSummarizationChunkHandler({
         },
       },
     };
-    if (pendingDeltas != null) {
-      pendingDeltas.push(event);
-      return;
-    }
-    void safeDispatchCustomEvent(GraphEvents.ON_SUMMARIZE_DELTA, event, config);
+    /** Awaited so deltas, and the reset that separates two attempts, arrive in order. */
+    return safeDispatchCustomEvent(
+      GraphEvents.ON_SUMMARIZE_DELTA,
+      event,
+      config
+    ).then(() => undefined);
   };
 }
 
@@ -2372,8 +2437,8 @@ async function summarizeWithCacheHit({
   config,
   stepId,
   provider,
-  reasoningKey,
   graph,
+  deltas,
   usePromptCache,
   promptCacheTtl,
   bedrockModelId,
@@ -2395,8 +2460,8 @@ async function summarizeWithCacheHit({
   config?: RunnableConfig;
   stepId?: string;
   provider: t.ProviderName;
-  reasoningKey?: 'reasoning_content' | 'reasoning';
   graph?: StreamLimitState & { getBreakerSignal?: () => AbortSignal };
+  deltas?: SummaryDeltaStream;
   usePromptCache?: boolean;
   promptCacheTtl?: PromptCacheTtl;
   bedrockModelId?: string;
@@ -2472,7 +2537,8 @@ async function summarizeWithCacheHit({
           promptCacheTtl,
           bedrockModelId,
         });
-    const pendingDeltas: t.SummarizeDeltaEvent[] = [];
+    /** Each pass is a new attempt: what an earlier one streamed is not its output. */
+    deltas?.abandon();
     try {
       result = await attemptInvoke(
         {
@@ -2487,9 +2553,8 @@ async function summarizeWithCacheHit({
             stepId,
             config: traceConfig(config, 'cache_hit_compaction'),
             provider,
-            reasoningKey,
             graph,
-            pendingDeltas,
+            deltas,
           }),
           streamLimitState: graph,
         },
@@ -2498,8 +2563,8 @@ async function summarizeWithCacheHit({
       const response = result.messages?.[0];
       signalConfig?.signal?.throwIfAborted();
       validateSummaryResponse(response);
-      if (response != null && extractResponseText(response) !== '') {
-        await flushSummarizationDeltas(pendingDeltas, config, graph);
+      if (response == null || extractResponseText(response) === '') {
+        deltas?.abandon();
       }
       break;
     } catch (error) {
