@@ -26,7 +26,9 @@ describe('buildBashExecutionToolDescription', () => {
     expect(BashExecutionToolDescription).toContain(
       'Failed executions register nothing'
     );
-    expect(BashExecutionToolDescription).toContain('`/tmp` never survives the call');
+    expect(BashExecutionToolDescription).toContain(
+      '`/tmp` never survives the call'
+    );
   });
 
   it('appends the tool-output references guide when enabled', () => {
@@ -49,6 +51,17 @@ describe('buildBashExecutionToolDescription', () => {
      */
     expect(BashToolOutputReferencesGuide).toContain('heredoc');
     expect(BashToolOutputReferencesGuide).toContain('<< \'EOF\'');
+  });
+
+  it('describes rejection of unknown keys and the literal escape', () => {
+    expect(BashToolOutputReferencesGuide).toContain(
+      'rejected before anything runs'
+    );
+    expect(BashToolOutputReferencesGuide).toContain('`\\{{tool0turn0}}`');
+    expect(BashToolOutputReferencesGuide).not.toContain('left in place');
+    expect(BashToolOutputReferencesGuide).toContain(
+      '`C:\\out\\\\{{tool0turn0}}`'
+    );
   });
 
   it('separates base and guide with a blank line', () => {
@@ -113,7 +126,9 @@ describe('buildBashExecutionToolDescription', () => {
     }).properties.command.description;
 
     expect(description).toContain('selected persistent project');
-    expect(description).toContain('Write anything needed later into the selected project');
+    expect(description).toContain(
+      'Write anything needed later into the selected project'
+    );
     expect(description).not.toContain('Prior /mnt/data files');
     expect(description).not.toContain('Anything a later call needs');
   });

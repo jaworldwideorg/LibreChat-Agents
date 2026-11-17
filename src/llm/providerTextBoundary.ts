@@ -1,7 +1,11 @@
 import { ChatGenerationChunk } from '@langchain/core/outputs';
 import { BaseChatModel } from '@langchain/core/language_models/chat_models';
 import { RunnableBinding, RunnableSequence } from '@langchain/core/runnables';
-import { AIMessage, AIMessageChunk, mergeContent } from '@langchain/core/messages';
+import {
+  AIMessage,
+  AIMessageChunk,
+  mergeContent,
+} from '@langchain/core/messages';
 import type { MessageContentComplex } from '@langchain/core/messages';
 import type { ChatResult } from '@langchain/core/outputs';
 import type { ProviderTextProtection } from '@/protection/providerText';
@@ -12,7 +16,20 @@ import {
   STREAMED_TOOL_CALL_ADAPTER_METADATA_KEY,
   STREAMED_TOOL_CALL_SEAL_METADATA_KEY,
 } from '@/tools/streamedToolCallSeals';
-import { GEMINI_SIGNATURES, RESPONSES_POSITIONS, stringMap, safetyRatings, replayPositions, ResponsesTextProjection, keys } from '@/llm/providerTextControls';
+import {
+  GEMINI_SIGNATURES,
+  RESPONSES_POSITIONS,
+  stringMap,
+  safetyRatings,
+  replayPositions,
+  ResponsesTextProjection,
+  keys,
+} from '@/llm/providerTextControls';
+import {
+  GEMINI_PARTS,
+  GEMINI_REPLAY_UNSUPPORTED,
+  isGeminiReplayParts,
+} from '@/llm/google/utils/signatures';
 import {
   ProviderTextAttempt,
   ProviderTextProtectionError,
@@ -32,11 +49,27 @@ const additionalKeys = new Set([
   'signature',
 ]);
 const metadataKeys = new Set([
-  'finish_reason', 'stop_reason', 'stop_sequence', 'model_name', 'model', 'model_provider',
-  'system_fingerprint', 'service_tier', 'usage', 'tokenUsage', 'input_tokens', 'output_tokens',
-  'total_tokens', 'index', 'prompt', 'completion', 'output_version',
+  'finish_reason',
+  'stop_reason',
+  'stop_sequence',
+  'model_name',
+  'model',
+  'model_provider',
+  'system_fingerprint',
+  'service_tier',
+  'usage',
+  'tokenUsage',
+  'input_tokens',
+  'output_tokens',
+  'total_tokens',
+  'index',
+  'prompt',
+  'completion',
+  'output_version',
 ]);
-const additionalControls: Readonly<Partial<Record<string, (value: unknown) => boolean>>> = {
+const additionalControls: Readonly<
+  Partial<Record<string, (value: unknown) => boolean>>
+> = {
   id: (value) => typeof value === 'string',
   type: (value) => value === 'message',
   role: (value) => value === 'assistant',
@@ -46,12 +79,26 @@ const additionalControls: Readonly<Partial<Record<string, (value: unknown) => bo
   usage: (value) => numericMetadata(value),
 };
 
-const geminiControls: Readonly<Partial<Record<string, (value: unknown) => boolean>>> = {
+const geminiControls: Readonly<
+  Partial<Record<string, (value: unknown) => boolean>>
+> = {
   [GEMINI_SIGNATURES]: stringMap,
-  finishReason: (value) => ['STOP', 'MAX_TOKENS', 'SAFETY', 'RECITATION', 'OTHER', 'MALFORMED_FUNCTION_CALL', 'FINISH_REASON_UNSPECIFIED'].includes(String(value)),
+  [GEMINI_PARTS]: isGeminiReplayParts,
+  [GEMINI_REPLAY_UNSUPPORTED]: (value) => value === true,
+  finishReason: (value) =>
+    [
+      'STOP',
+      'MAX_TOKENS',
+      'SAFETY',
+      'RECITATION',
+      'OTHER',
+      'MALFORMED_FUNCTION_CALL',
+      'FINISH_REASON_UNSPECIFIED',
+    ].includes(String(value)),
   safetyRatings,
   avgLogprobs: (value) => typeof value === 'number' && Number.isFinite(value),
-  index: (value) => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0,
+  index: (value) =>
+    typeof value === 'number' && Number.isSafeInteger(value) && value >= 0,
 };
 
 const controlBlocks = new Set([
@@ -79,7 +126,8 @@ function copyMessage(
     additional_kwargs: message.additional_kwargs,
     response_metadata: message.response_metadata,
     tool_calls: message.tool_calls,
-    tool_call_chunks: message instanceof AIMessageChunk ? message.tool_call_chunks : undefined,
+    tool_call_chunks:
+      message instanceof AIMessageChunk ? message.tool_call_chunks : undefined,
     invalid_tool_calls: message.invalid_tool_calls,
     usage_metadata: message.usage_metadata,
   });
@@ -92,17 +140,31 @@ function copyMessage(
 function numericMetadata(value: unknown, depth = 4): boolean {
   if (value == null) return true;
   if (typeof value === 'number') return Number.isFinite(value);
-  if (typeof value !== 'object' || Array.isArray(value) || depth === 0) return false;
+  if (typeof value !== 'object' || Array.isArray(value) || depth === 0)
+    return false;
   const values = Object.values(value);
-  return values.length <= 64 && values.every((entry) => numericMetadata(entry, depth - 1));
+  return (
+    values.length <= 64 &&
+    values.every((entry) => numericMetadata(entry, depth - 1))
+  );
 }
 
-function hasKeys(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
-  return value != null && typeof value === 'object' && !Array.isArray(value) &&
-    Object.keys(value).every((key) => keys.includes(key));
+function hasKeys(
+  value: unknown,
+  keys: readonly string[]
+): value is Record<string, unknown> {
+  return (
+    value != null &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    Object.keys(value).every((key) => keys.includes(key))
+  );
 }
 
-function validateMetadata(metadata: AIMessageChunk['response_metadata'], google = false): void {
+function validateMetadata(
+  metadata: AIMessageChunk['response_metadata'],
+  google = false
+): void {
   for (const key of Object.keys(metadata)) {
     const value: unknown = metadata[key];
     let valid: boolean;
@@ -111,22 +173,33 @@ function validateMetadata(metadata: AIMessageChunk['response_metadata'], google 
     } else if (additionalControls[key] != null) {
       valid = additionalControls[key](value);
     } else if (key === 'contentBlockIndex') {
-      valid = typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+      valid =
+        typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
     } else if (key === STREAMED_TOOL_CALL_ADAPTER_METADATA_KEY) {
       valid = getStreamedToolCallAdapter(metadata) != null;
     } else if (key === STREAMED_TOOL_CALL_SEAL_METADATA_KEY) {
-      valid = hasKeys(value, ['kind', 'id', 'index']) && getStreamedToolCallSeal(metadata) != null;
+      valid =
+        hasKeys(value, ['kind', 'id', 'index']) &&
+        getStreamedToolCallSeal(metadata) != null;
     } else if (key === 'messageStart') {
       valid = hasKeys(value, ['role']) && value.role === 'assistant';
     } else if (key === 'messageStop') {
-      valid = hasKeys(value, ['stopReason']) && typeof value.stopReason === 'string';
+      valid =
+        hasKeys(value, ['stopReason']) && typeof value.stopReason === 'string';
     } else if (key === 'metadata') {
       valid = hasKeys(value, ['usage', 'metrics']) && numericMetadata(value);
-    } else if (key === 'usage' || key === 'tokenUsage' || key === 'estimatedTokenUsage') {
+    } else if (
+      key === 'usage' ||
+      key === 'tokenUsage' ||
+      key === 'estimatedTokenUsage'
+    ) {
       valid = numericMetadata(value);
     } else {
-      valid = metadataKeys.has(key) && (value == null || typeof value === 'string' ||
-        (typeof value === 'number' && Number.isFinite(value)));
+      valid =
+        metadataKeys.has(key) &&
+        (value == null ||
+          typeof value === 'string' ||
+          (typeof value === 'number' && Number.isFinite(value)));
     }
     if (!valid) throw new ProviderTextProtectionError('unsupported');
   }
@@ -138,7 +211,12 @@ class Candidate {
   private readonly toolInputIndices = new Set<number>();
   private readonly responses: ResponsesTextProjection;
 
-  constructor(private readonly attempt: ProviderTextAttempt, private readonly provider?: ProviderName) { this.responses = new ResponsesTextProjection(attempt); }
+  constructor(
+    private readonly attempt: ProviderTextAttempt,
+    private readonly provider?: ProviderName
+  ) {
+    this.responses = new ResponsesTextProjection(attempt);
+  }
 
   strip(generation: ChatGenerationChunk): ChatGenerationChunk {
     const message = generation.message;
@@ -147,9 +225,13 @@ class Candidate {
     this.attempt.observeChunk();
     for (const key of Object.keys(message.additional_kwargs)) {
       if (additionalKeys.has(key)) continue;
-      const validate = (this.provider === Providers.GOOGLE ? geminiControls[key] : undefined) ??
+      const validate =
+        (this.provider === Providers.GOOGLE
+          ? geminiControls[key]
+          : undefined) ??
         (key === RESPONSES_POSITIONS ? replayPositions : undefined) ??
-        (key === '__openai_function_call_ids__' ? stringMap : undefined) ?? additionalControls[key];
+        (key === '__openai_function_call_ids__' ? stringMap : undefined) ??
+        additionalControls[key];
       if (validate == null || !validate(message.additional_kwargs[key])) {
         throw new ProviderTextProtectionError('unsupported');
       }
@@ -160,7 +242,12 @@ class Candidate {
         throw new ProviderTextProtectionError('unsupported');
       this.stringContent ||= message.content.length > 0;
       const details = message.additional_kwargs.reasoning_details;
-      this.attempt.append(message.content, this.provider === Providers.OPENROUTER && Array.isArray(details) && details.length > 0);
+      this.attempt.append(
+        message.content,
+        this.provider === Providers.OPENROUTER &&
+          Array.isArray(details) &&
+          details.length > 0
+      );
       content = '';
     } else {
       content = [];
@@ -176,10 +263,15 @@ class Candidate {
           typeof block.text !== 'string' ||
           this.stringContent ||
           Object.keys(block).some(
-            (key) => !['type', 'text', 'index', 'annotations', 'phase'].includes(key)
+            (key) =>
+              !['type', 'text', 'index', 'annotations', 'phase'].includes(key)
           ) ||
-          ('annotations' in block && (!Array.isArray(block.annotations) || block.annotations.length > 0)) ||
-          ('phase' in block && block.phase != null && !['commentary', 'final_answer'].includes(String(block.phase)))
+          ('annotations' in block &&
+            (!Array.isArray(block.annotations) ||
+              block.annotations.length > 0)) ||
+          ('phase' in block &&
+            block.phase != null &&
+            !['commentary', 'final_answer'].includes(String(block.phase)))
         ) {
           throw new ProviderTextProtectionError('unsupported');
         }
@@ -191,40 +283,82 @@ class Candidate {
       }
     }
     const metadata = this.responses.strip(message.response_metadata);
-    if (!Object.hasOwn(message.response_metadata, 'output')) validateMetadata(metadata, this.provider === Providers.GOOGLE);
-    validateMetadata(generation.generationInfo ?? {}, this.provider === Providers.GOOGLE);
+    if (!Object.hasOwn(message.response_metadata, 'output'))
+      validateMetadata(metadata, this.provider === Providers.GOOGLE);
+    validateMetadata(
+      generation.generationInfo ?? {},
+      this.provider === Providers.GOOGLE
+    );
     const stripped = copyMessage(message, content);
     stripped.response_metadata = metadata;
     stripped.lc_kwargs.response_metadata = metadata;
-    return new ChatGenerationChunk({ text: '', message: stripped, generationInfo: generation.generationInfo });
+    return new ChatGenerationChunk({
+      text: '',
+      message: stripped,
+      generationInfo: generation.generationInfo,
+    });
   }
 
-  private admitControl(block: MessageContentComplex, message: AIMessageChunk): void {
-    const control: { type?: string; index?: unknown; input?: unknown; id?: unknown; name?: unknown } = block;
+  private admitControl(
+    block: MessageContentComplex,
+    message: AIMessageChunk
+  ): void {
+    const control: {
+      type?: string;
+      index?: unknown;
+      input?: unknown;
+      id?: unknown;
+      name?: unknown;
+    } = block;
     const { type, index, input, id, name } = control;
     const part: unknown = block;
-    if (this.provider === Providers.GOOGLE && keys(part, ['functionCall', 'thoughtSignature']) &&
-        keys(part.functionCall, ['name', 'args', 'id'])) {
+    if (
+      this.provider === Providers.GOOGLE &&
+      keys(part, ['functionCall', 'thoughtSignature']) &&
+      keys(part.functionCall, ['name', 'args', 'id'])
+    ) {
       const call = part.functionCall;
-      if (typeof call.name !== 'string' || (part.thoughtSignature != null && typeof part.thoughtSignature !== 'string') ||
-          message.tool_calls?.some((tool) => tool.name === call.name && JSON.stringify(tool.args) === JSON.stringify(call.args)) !== true) {
+      if (
+        typeof call.name !== 'string' ||
+        (part.thoughtSignature != null &&
+          typeof part.thoughtSignature !== 'string') ||
+        message.tool_calls?.some(
+          (tool) =>
+            tool.name === call.name &&
+            JSON.stringify(tool.args) === JSON.stringify(call.args)
+        ) !== true
+      ) {
         throw new ProviderTextProtectionError('unsupported');
       }
       return;
     }
     if (!Object.hasOwn(block, 'type')) {
-      if (!hasKeys(block, ['index', 'input']) || typeof index !== 'number' ||
-          !Number.isSafeInteger(index) || index < 0 || typeof input !== 'string' ||
-          !this.toolInputIndices.has(index) ||
-          message.tool_call_chunks?.some((call) => call.index === index && call.args === input) !== true) {
+      if (
+        !hasKeys(block, ['index', 'input']) ||
+        typeof index !== 'number' ||
+        !Number.isSafeInteger(index) ||
+        index < 0 ||
+        typeof input !== 'string' ||
+        !this.toolInputIndices.has(index) ||
+        message.tool_call_chunks?.some(
+          (call) => call.index === index && call.args === input
+        ) !== true
+      ) {
         throw new ProviderTextProtectionError('unsupported');
       }
       return;
     }
-    if (type == null || !controlBlocks.has(type)) throw new ProviderTextProtectionError('unsupported');
+    if (type == null || !controlBlocks.has(type))
+      throw new ProviderTextProtectionError('unsupported');
     if (type === 'tool_use' && index != null) {
-      if (typeof index !== 'number' || !Number.isSafeInteger(index) || index < 0 ||
-          message.tool_call_chunks?.some((call) => call.index === index && call.id === id && call.name === name) !== true) {
+      if (
+        typeof index !== 'number' ||
+        !Number.isSafeInteger(index) ||
+        index < 0 ||
+        message.tool_call_chunks?.some(
+          (call) => call.index === index && call.id === id && call.name === name
+        ) !== true
+      ) {
         throw new ProviderTextProtectionError('unsupported');
       }
       if (!this.toolInputIndices.has(index)) {
@@ -257,10 +391,15 @@ function clone<T extends object>(value: T): T {
 }
 
 function assertBindingShell(model: RunnableBinding<never, unknown>): void {
-  if (model.constructor !== RunnableBinding || (model.configFactories?.length ?? 0) > 0 ||
-      model.invoke !== RunnableBinding.prototype.invoke || model.batch !== RunnableBinding.prototype.batch ||
-      model.stream !== RunnableBinding.prototype.stream || model.transform !== RunnableBinding.prototype.transform ||
-      model._streamIterator !== RunnableBinding.prototype._streamIterator) {
+  if (
+    model.constructor !== RunnableBinding ||
+    (model.configFactories?.length ?? 0) > 0 ||
+    model.invoke !== RunnableBinding.prototype.invoke ||
+    model.batch !== RunnableBinding.prototype.batch ||
+    model.stream !== RunnableBinding.prototype.stream ||
+    model.transform !== RunnableBinding.prototype.transform ||
+    model._streamIterator !== RunnableBinding.prototype._streamIterator
+  ) {
     throw new ProviderTextProtectionError('unsupported');
   }
 }
@@ -294,7 +433,11 @@ function usesInternalStreaming(
   if (hasStreamingInvocation(model, options)) return true;
   for (const key of ['completions', 'responses'] as const) {
     const delegate: unknown = Reflect.get(model, key);
-    if (delegate instanceof BaseChatModel && hasStreamingInvocation(delegate, options)) return true;
+    if (
+      delegate instanceof BaseChatModel &&
+      hasStreamingInvocation(delegate, options)
+    )
+      return true;
   }
   return false;
 }
@@ -309,19 +452,28 @@ export function withProviderTextBoundary(
   if (model instanceof RunnableBinding) {
     assertBindingShell(model);
     Object.defineProperty(protectedModel, 'bound', {
-      value: withProviderTextBoundary(model.bound as ChatModel, policy, provider),
+      value: withProviderTextBoundary(
+        model.bound as ChatModel,
+        policy,
+        provider
+      ),
     });
     return protectedModel;
   }
   if (model instanceof RunnableSequence) {
-    if (model.constructor !== RunnableSequence ||
-        model.invoke !== RunnableSequence.prototype.invoke || model.batch !== RunnableSequence.prototype.batch ||
-        model.stream !== RunnableSequence.prototype.stream || model.transform !== RunnableSequence.prototype.transform ||
-        model._streamIterator !== RunnableSequence.prototype._streamIterator) {
+    if (
+      model.constructor !== RunnableSequence ||
+      model.invoke !== RunnableSequence.prototype.invoke ||
+      model.batch !== RunnableSequence.prototype.batch ||
+      model.stream !== RunnableSequence.prototype.stream ||
+      model.transform !== RunnableSequence.prototype.transform ||
+      model._streamIterator !== RunnableSequence.prototype._streamIterator
+    ) {
       throw new ProviderTextProtectionError('unsupported');
     }
     const steps = model.steps;
-    for (let index = 0; index < steps.length - 1; index++) assertInputStep(steps[index]);
+    for (let index = 0; index < steps.length - 1; index++)
+      assertInputStep(steps[index]);
     Object.defineProperty(protectedModel, 'last', {
       value: withProviderTextBoundary(
         steps[steps.length - 1] as ChatModel,
@@ -334,16 +486,24 @@ export function withProviderTextBoundary(
   if (!(model instanceof BaseChatModel) || model.cache != null) {
     throw new ProviderTextProtectionError('unsupported');
   }
-  if (model.transform !== BaseChatModel.prototype.transform ||
-      model._streamIterator !== BaseChatModel.prototype._streamIterator ||
-      model.generate !== BaseChatModel.prototype.generate ||
-      model.generatePrompt !== BaseChatModel.prototype.generatePrompt ||
-      model._generateUncached !== BaseChatModel.prototype._generateUncached) {
+  if (
+    model.transform !== BaseChatModel.prototype.transform ||
+    model._streamIterator !== BaseChatModel.prototype._streamIterator ||
+    model.generate !== BaseChatModel.prototype.generate ||
+    model.generatePrompt !== BaseChatModel.prototype.generatePrompt ||
+    model._generateUncached !== BaseChatModel.prototype._generateUncached
+  ) {
     throw new ProviderTextProtectionError('unsupported');
   }
-  if (model.stream !== BaseChatModel.prototype.stream || model.invoke !== BaseChatModel.prototype.invoke) {
+  if (
+    model.stream !== BaseChatModel.prototype.stream ||
+    model.invoke !== BaseChatModel.prototype.invoke
+  ) {
     const openAI = getChatModelClass(Providers.OPENAI);
-    if (model.stream !== openAI.prototype.stream || model.invoke !== openAI.prototype.invoke) {
+    if (
+      model.stream !== openAI.prototype.stream ||
+      model.invoke !== openAI.prototype.invoke
+    ) {
       throw new ProviderTextProtectionError('unsupported');
     }
   }
@@ -396,7 +556,8 @@ export function withProviderTextBoundary(
       }
     } finally {
       try {
-        if (source != null) void attempt.wait(source.return(undefined)).catch(() => {});
+        if (source != null)
+          void attempt.wait(source.return(undefined)).catch(() => {});
       } finally {
         attempt.finish();
       }
@@ -404,8 +565,12 @@ export function withProviderTextBoundary(
   };
   protectedChat._streamChatModelEvents =
     BaseChatModel.prototype._streamChatModelEvents;
-  protectedChat._generate = async function (messages, options): Promise<ChatResult> {
-    if (usesInternalStreaming(model, options)) throw new ProviderTextProtectionError('unsupported');
+  protectedChat._generate = async function (
+    messages,
+    options
+  ): Promise<ChatResult> {
+    if (usesInternalStreaming(model, options))
+      throw new ProviderTextProtectionError('unsupported');
     const attempt = new ProviderTextAttempt(policy, options.signal);
     try {
       const result = await attempt.wait(
@@ -416,26 +581,44 @@ export function withProviderTextBoundary(
         )
       );
       attempt.check();
-      if (result.llmOutput != null) validateMetadata(result.llmOutput, provider === Providers.GOOGLE);
+      if (result.llmOutput != null)
+        validateMetadata(result.llmOutput, provider === Providers.GOOGLE);
       if (result.generations.length !== 1)
         throw new ProviderTextProtectionError('unsupported');
       const generation = result.generations[0];
-      if (!(generation.message instanceof AIMessage)) throw new ProviderTextProtectionError('unsupported');
-      const message = generation.message instanceof AIMessageChunk ? generation.message : copyMessage(generation.message, generation.message.content);
+      if (!(generation.message instanceof AIMessage))
+        throw new ProviderTextProtectionError('unsupported');
+      const message =
+        generation.message instanceof AIMessageChunk
+          ? generation.message
+          : copyMessage(generation.message, generation.message.content);
       const candidate = new Candidate(attempt, provider);
       const stripped = candidate.strip(
         new ChatGenerationChunk({ ...generation, message })
       );
       const canonical = await candidate.canonical();
       attempt.check();
-      const released = canonical == null ? stripped : new ChatGenerationChunk({
-        text: canonical.text,
-        message: copyMessage(stripped.message as AIMessageChunk, mergeContent(stripped.message.content, canonical.message.content)),
-        generationInfo: stripped.generationInfo,
-      });
+      const released =
+        canonical == null
+          ? stripped
+          : new ChatGenerationChunk({
+            text: canonical.text,
+            message: copyMessage(
+                stripped.message as AIMessageChunk,
+                mergeContent(
+                  stripped.message.content,
+                  canonical.message.content
+                )
+            ),
+            generationInfo: stripped.generationInfo,
+          });
       if (canonical != null) {
-        released.message.response_metadata = { ...released.message.response_metadata, ...canonical.message.response_metadata };
-        released.message.lc_kwargs.response_metadata = released.message.response_metadata;
+        released.message.response_metadata = {
+          ...released.message.response_metadata,
+          ...canonical.message.response_metadata,
+        };
+        released.message.lc_kwargs.response_metadata =
+          released.message.response_metadata;
       }
       return { ...result, generations: [released] };
     } finally {
