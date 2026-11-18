@@ -36,6 +36,7 @@ import {
 } from '@/protection/providerText';
 import { isProviderTextInput } from '@/protection/providerTextInput';
 import { createProviderTextChunk } from '@/llm/providerTextChunk';
+import { preserveModelInvocationContext } from '@/llm/invocation';
 import { getChatModelClass } from '@/llm/providers';
 import { Providers } from '@/common';
 
@@ -522,7 +523,11 @@ export function withProviderTextBoundary(
     try {
       source = model._streamResponseChunks(
         messages,
-        { ...options, signal: attempt.signal },
+        preserveModelInvocationContext(
+          options,
+          { ...options, signal: attempt.signal },
+          runManager
+        ),
         undefined
       );
       for (;;) {
@@ -567,7 +572,8 @@ export function withProviderTextBoundary(
     BaseChatModel.prototype._streamChatModelEvents;
   protectedChat._generate = async function (
     messages,
-    options
+    options,
+    runManager
   ): Promise<ChatResult> {
     if (usesInternalStreaming(model, options))
       throw new ProviderTextProtectionError('unsupported');
@@ -576,7 +582,11 @@ export function withProviderTextBoundary(
       const result = await attempt.wait(
         model._generate(
           messages,
-          { ...options, signal: attempt.signal },
+          preserveModelInvocationContext(
+            options,
+            { ...options, signal: attempt.signal },
+            runManager
+          ),
           undefined
         )
       );

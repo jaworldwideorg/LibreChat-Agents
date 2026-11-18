@@ -25,16 +25,17 @@ jest.mock('node-fetch', () => ({
   default: async (url: string, init?: { body?: string }) => {
     const body = JSON.parse(init?.body ?? '{}') as SandboxRequestBody;
     requests.push({ url, body });
-    const truncation = body.code?.includes('trigger_truncation') === true
-      ? {
-        artifact_truncation: {
-          code: 'artifact_truncated',
-          reasons: { max_files: 1 },
-          skipped: ['missing.csv'],
-          skipped_count: 1,
-        },
-      }
-      : {};
+    const truncation =
+      body.code?.includes('trigger_truncation') === true
+        ? {
+          artifact_truncation: {
+            code: 'artifact_truncated',
+            reasons: { max_files: 1 },
+            skipped: ['missing.csv'],
+            skipped_count: 1,
+          },
+        }
+        : {};
 
     if (url.endsWith('/exec/programmatic')) {
       if (!Array.isArray(body.tools) || body.tools.length === 0) {
@@ -242,28 +243,31 @@ describe('artifact truncation across programmatic routes', () => {
     ['python', invokePython, []],
     ['bash with tools', invokeBash, ['get_weather']],
     ['python with tools', invokePython, ['get_weather']],
-  ] as const)('surfaces omissions for %s', async (_kind, invokeTool, tool_manifest) => {
-    const result = (await invokeTool({
-      code: _kind.startsWith('python')
-        ? 'print("trigger_truncation")'
-        : 'echo trigger_truncation',
-      tool_manifest: [...tool_manifest],
-    })) as ToolResult;
+  ] as const)(
+    'surfaces omissions for %s',
+    async (_kind, invokeTool, tool_manifest) => {
+      const result = (await invokeTool({
+        code: _kind.startsWith('python')
+          ? 'print("trigger_truncation")'
+          : 'echo trigger_truncation',
+        tool_manifest: [...tool_manifest],
+      })) as ToolResult;
 
-    expect(requests).toHaveLength(1);
-    expect(requests[0].url).toBe(
-      `${BASE_URL}/${tool_manifest.length > 0 ? 'exec/programmatic' : 'exec'}`
-    );
-    expect(result.content).toContain('1 file(s) were omitted from delivery');
-    expect(result.content).toContain('missing.csv');
-    expect(result.content).toContain('do not rerun automatically');
-    expect(result.artifact?.artifact_truncation).toEqual({
-      code: 'artifact_truncated',
-      reasons: { max_files: 1 },
-      skipped: ['missing.csv'],
-      skipped_count: 1,
-    });
-  });
+      expect(requests).toHaveLength(1);
+      expect(requests[0].url).toBe(
+        `${BASE_URL}/${tool_manifest.length > 0 ? 'exec/programmatic' : 'exec'}`
+      );
+      expect(result.content).toContain('1 file(s) were omitted from delivery');
+      expect(result.content).toContain('missing.csv');
+      expect(result.content).toContain('do not rerun automatically');
+      expect(result.artifact?.artifact_truncation).toEqual({
+        code: 'artifact_truncated',
+        reasons: { max_files: 1 },
+        skipped: ['missing.csv'],
+        skipped_count: 1,
+      });
+    }
+  );
 });
 
 describe('behavior that stays as it was', () => {
@@ -317,6 +321,46 @@ describe('behavior that stays as it was', () => {
     );
 
     expect(requests[0].url).toBe(`${BASE_URL}/exec`);
+  });
+});
+
+describe.each([
+  ['Bash', invokeBash],
+  ['Python', invokePython],
+])('%s sandbox-name manifests', (_runtime, invokeTool) => {
+  beforeEach(() => {
+    requests.length = 0;
+  });
+
+  it.each(['stub_echo_mcp_hypen-server', 'stub_echo_mcp_hypen_server'])(
+    'sends the original registered definition for %s',
+    async (manifestName) => {
+      const definition: t.LCTool = {
+        name: 'stub_echo_mcp_hypen-server',
+        allowed_callers: ['code_execution'],
+      };
+      await invokeTool(
+        { code: 'stub_echo_mcp_hypen_server', tool_manifest: [manifestName] },
+        {
+          toolMap: new Map([[definition.name, createCalculatorTool()]]),
+          toolDefs: [definition],
+          disallowedToolDefs: [{ name: 'direct_only' }],
+        }
+      );
+
+      expect(requests).toHaveLength(1);
+      expect(requests[0].body.tools).toEqual([definition]);
+    }
+  );
+
+  it('rejects normalized direct-only names before sending a request', async () => {
+    await expect(
+      invokeTool(
+        { code: 'send_email', tool_manifest: ['send_email'] },
+        { ...DEFAULT_CONTEXT, disallowedToolDefs: [{ name: 'send-email' }] }
+      )
+    ).rejects.toThrow('not marked for code_execution');
+    expect(requests).toHaveLength(0);
   });
 });
 

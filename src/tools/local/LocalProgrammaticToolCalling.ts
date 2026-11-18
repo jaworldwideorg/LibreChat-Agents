@@ -245,8 +245,7 @@ export async function applyPreToolUseHooksForBridge(
     return {
       input: nextInput,
       denyReason:
-        result.decision === 'ask' &&
-        hookContext.failClosedOnHookError === true
+        result.decision === 'ask' && hookContext.failClosedOnHookError === true
           ? `Approval required for "${toolName}"; unavailable in a background subagent. Ask the parent to run it in the foreground.${result.reason == null ? '' : ` Reason: ${result.reason}`}`
           : (result.reason ??
             (result.decision === 'ask'
@@ -600,6 +599,10 @@ async function runLocalProgrammaticTool(args: {
     allowedToolDefs: toolDefs,
     disallowedToolDefs,
     programmaticToolName: runnerName,
+    normalizeIdentifier:
+      args.runtime === 'bash'
+        ? normalizeToBashIdentifier
+        : normalizeToPythonIdentifier,
   });
 
   /* The local program builder supports zero stubs, so a call that selected no
