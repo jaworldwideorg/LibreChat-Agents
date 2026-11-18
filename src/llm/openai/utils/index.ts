@@ -55,8 +55,8 @@ import {
   projectToolCallInputs,
   serializeToolCallInput,
 } from '@/messages/prune';
-import { toLangChainContent } from '@/messages/langchain';
 import { isAnthropicThinkingContentBlock } from '@/messages/reasoningTypes';
+import { toLangChainContent } from '@/messages/langchain';
 
 export type { OpenAICallOptions, OpenAIChatInput };
 
@@ -560,7 +560,7 @@ function _convertReasoningSummaryToOpenAIResponsesParams(
   reasoning: ChatOpenAIReasoningSummary
 ): OpenAIClient.Responses.ResponseReasoningItem {
   // combine summary parts that have the the same index and then remove the indexes
-  const summary = (
+  const summary: OpenAIClient.Responses.ResponseReasoningItem.Summary[] = (
     reasoning.summary.length > 1
       ? reasoning.summary.reduce(
         (acc, curr) => {
@@ -576,9 +576,7 @@ function _convertReasoningSummaryToOpenAIResponsesParams(
         [{ ...reasoning.summary[0] }]
       )
       : reasoning.summary
-  ).map((s) =>
-    Object.fromEntries(Object.entries(s).filter(([k]) => k !== 'index'))
-  ) as OpenAIClient.Responses.ResponseReasoningItem.Summary[];
+  ).map(({ index: _index, ...part }) => part);
 
   return {
     ...reasoning,

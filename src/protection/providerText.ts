@@ -1,4 +1,8 @@
 import { performance } from 'node:perf_hooks';
+import type {
+  ProviderTextAdmission,
+  ProviderTextAdmissionLease,
+} from './providerTextAdmission';
 import { PreparedSubagentError } from '@/tools/preparedSubagents';
 import { StreamLimitExceededError } from '@/llm/streamLimits';
 
@@ -71,14 +75,28 @@ export function createProviderTextRestartCancellation(): ProviderTextProtectionE
 }
 
 export function isProviderTextRestartCancellation(error: unknown): boolean {
-  return error instanceof ProviderTextProtectionError && restartCancellations.has(error);
+  return (
+    error instanceof ProviderTextProtectionError &&
+    restartCancellations.has(error)
+  );
 }
 
-function protectionAbortError(parent?: AbortSignal): ProviderTextProtectionError | StreamLimitExceededError | PreparedSubagentError {
+function protectionAbortError(
+  parent?: AbortSignal
+):
+  | ProviderTextProtectionError
+  | StreamLimitExceededError
+  | PreparedSubagentError {
   const reason: unknown = parent?.reason;
-  if (reason instanceof StreamLimitExceededError || reason instanceof PreparedSubagentError) return reason;
+  if (
+    reason instanceof StreamLimitExceededError ||
+    reason instanceof PreparedSubagentError
+  )
+    return reason;
   if (reason instanceof ProviderTextProtectionError) {
-    return isProviderTextRestartCancellation(reason) ? reason : new ProviderTextProtectionError(reason.code);
+    return isProviderTextRestartCancellation(reason)
+      ? reason
+      : new ProviderTextProtectionError(reason.code);
   }
   return new ProviderTextProtectionError('cancelled');
 }
@@ -101,12 +119,80 @@ const errorCodes = new Set<ProviderTextProtectionErrorCode>([
   'incompatible',
 ]);
 
+export type ProviderTextProtectionFailure = Extract<
+  ProviderTextProtectionResult,
+  { ok: false }
+>;
+
+function isProtectionErrorCode(
+  code: unknown
+): code is ProviderTextProtectionErrorCode {
+  return (
+    typeof code === 'string' && (errorCodes as ReadonlySet<string>).has(code)
+  );
+}
+
+/** Safe wire failure, including errors raised by a separate CJS/ESM copy of the SDK. */
+export function serializeProviderTextProtectionError(
+  error: unknown
+): ProviderTextProtectionFailure {
+  let code: ProviderTextProtectionErrorCode = 'unavailable';
+  try {
+    if (
+      error != null &&
+      typeof error === 'object' &&
+      'name' in error &&
+      error.name === 'ProviderTextProtectionError' &&
+      'code' in error &&
+      isProtectionErrorCode(error.code)
+    )
+      code = error.code;
+  } catch {
+    // Never serialize arbitrary exception messages, stacks, causes, or getters.
+  }
+  return { version: 1, ok: false, error: { code } };
+}
+
+/** Decode only an authenticated host's failure envelope; unknown versions/codes fail closed. */
+export function deserializeProviderTextProtectionError(
+  failure: unknown
+): ProviderTextProtectionError {
+  try {
+    if (
+      failure != null &&
+      typeof failure === 'object' &&
+      'version' in failure &&
+      failure.version === 1 &&
+      'ok' in failure &&
+      failure.ok === false &&
+      'error' in failure &&
+      failure.error != null &&
+      typeof failure.error === 'object' &&
+      'code' in failure.error &&
+      isProtectionErrorCode(failure.error.code)
+    ) {
+      return new ProviderTextProtectionError(failure.error.code);
+    }
+  } catch {
+    // Malformed failures cannot become host policy decisions.
+  }
+  return new ProviderTextProtectionError('incompatible');
+}
+
+export function validateProviderTextTimeout(timeoutMs: number): void {
+  if (
+    !Number.isSafeInteger(timeoutMs) ||
+    timeoutMs <= 0 ||
+    timeoutMs > 2_147_483_647
+  )
+    throw new ProviderTextProtectionError('incompatible');
+}
+
 export function validateProviderTextProtection(
   policy: ProviderTextProtection
 ): void {
   const version: number = policy.version;
-  if (version !== 1)
-    throw new ProviderTextProtectionError('incompatible');
+  if (version !== 1) throw new ProviderTextProtectionError('incompatible');
   if (
     typeof policy.inspect !== 'function' ||
     typeof policy.classify !== 'function'
@@ -130,6 +216,11 @@ export function validateProviderTextProtection(
   }
 }
 
+export interface ProviderTextAttemptOptions {
+  readonly timeoutMs?: number;
+  readonly admission?: ProviderTextAdmission;
+}
+
 /** A lease stays charged while a cancellation-ignoring producer/handler still owns raw text. */
 export class ProviderTextAttempt {
   private readonly controller = new AbortController();
@@ -142,25 +233,52 @@ export class ProviderTextAttempt {
   private readonly timer: ReturnType<typeof setTimeout>;
   private readonly abort: () => void;
   private finished = false;
+  private readonly admission?: ProviderTextAdmissionLease;
 
   constructor(
     private readonly policy: ProviderTextProtection,
-    private readonly parent?: AbortSignal
+    private readonly parent?: AbortSignal,
+    options: ProviderTextAttemptOptions = {}
   ) {
     validateProviderTextProtection(policy);
-    this.deadline = performance.now() + policy.timeoutMs;
+    const timeoutMs = options.timeoutMs ?? policy.timeoutMs;
+    validateProviderTextTimeout(timeoutMs);
+    this.deadline = performance.now() + Math.min(timeoutMs, policy.timeoutMs);
     this.budget = budgets.get(policy) ?? { bytes: 0 };
     budgets.set(policy, this.budget);
-    if (parent?.aborted === true) throw protectionAbortError(parent);
-    this.charge(512);
-    protectedSignals.add(this.signal);
     this.abort = (): void =>
       this.controller.abort(protectionAbortError(this.parent));
-    parent?.addEventListener('abort', this.abort, { once: true });
-    this.timer = setTimeout(() => {
-      this.controller.abort(new ProviderTextProtectionError('timeout'));
-    }, policy.timeoutMs);
-    this.timer.unref();
+    if (parent?.aborted === true) throw protectionAbortError(parent);
+    this.admission = options.admission?.acquire();
+    try {
+      this.charge(512);
+      parent?.addEventListener('abort', this.abort, { once: true });
+      this.check();
+      this.timer = setTimeout(
+        () => {
+          this.controller.abort(new ProviderTextProtectionError('timeout'));
+        },
+        Math.min(timeoutMs, policy.timeoutMs)
+      );
+      this.timer.unref();
+      protectedSignals.add(this.signal);
+    } catch (error) {
+      this.budget.bytes -= this.bytes;
+      this.bytes = 0;
+      this.admission?.release();
+      try {
+        parent?.removeEventListener('abort', this.abort);
+      } catch {
+        // Malformed transport signals must not prevent admission rollback.
+      }
+      if (
+        error instanceof ProviderTextProtectionError ||
+        error instanceof StreamLimitExceededError ||
+        error instanceof PreparedSubagentError
+      )
+        throw error;
+      throw new ProviderTextProtectionError('incompatible');
+    }
   }
 
   get signal(): AbortSignal {
@@ -168,9 +286,9 @@ export class ProviderTextAttempt {
   }
 
   check(): void {
+    if (this.finished) throw new ProviderTextProtectionError('incompatible');
     if (this.signal.aborted) throw this.signal.reason;
-    if (this.parent?.aborted === true)
-      throw protectionAbortError(this.parent);
+    if (this.parent?.aborted === true) throw protectionAbortError(this.parent);
     if (performance.now() >= this.deadline) {
       this.controller.abort(new ProviderTextProtectionError('timeout'));
       throw this.signal.reason;
@@ -185,13 +303,20 @@ export class ProviderTextAttempt {
       this.controller.abort(new ProviderTextProtectionError('overflow'));
       throw this.signal.reason;
     }
+    try {
+      this.admission?.charge(bytes);
+    } catch (error) {
+      this.controller.abort(error);
+      throw error;
+    }
     this.bytes += bytes;
     this.budget.bytes += bytes;
   }
 
   append(text: string, cumulativeReplay = false): void {
     this.check();
-    if (cumulativeReplay && this.hasCandidatePrefix(text)) text = text.slice(this.textLength);
+    if (cumulativeReplay && this.hasCandidatePrefix(text))
+      text = text.slice(this.textLength);
     if (!text) return;
     const bytes = text.length * 2;
     this.charge(bytes * 2 + 64);
@@ -211,7 +336,10 @@ export class ProviderTextAttempt {
   }
 
   matchesText(text: string): boolean {
-    return text.length === this.textLength && (text.length === 0 || this.hasCandidatePrefix(text));
+    return (
+      text.length === this.textLength &&
+      (text.length === 0 || this.hasCandidatePrefix(text))
+    );
   }
 
   retain(bytes: number): void {
@@ -238,8 +366,14 @@ export class ProviderTextAttempt {
         this.pending.delete(work);
       };
       void work.then(
-        (value) => { settle(); resolve(value); },
-        (error: Error) => { settle(); reject(error); }
+        (value) => {
+          settle();
+          resolve(value);
+        },
+        (error: Error) => {
+          settle();
+          reject(error);
+        }
       );
     });
   }
@@ -268,8 +402,9 @@ export class ProviderTextAttempt {
     } catch (error) {
       this.check();
       if (isProviderTextRestartCancellation(error)) throw error;
-      if (error instanceof ProviderTextProtectionError) throw new ProviderTextProtectionError(error.code);
-      throw new ProviderTextProtectionError('unavailable');
+      throw deserializeProviderTextProtectionError(
+        serializeProviderTextProtectionError(error)
+      );
     }
     this.check();
     const canonical = validateResult(result);
@@ -282,21 +417,33 @@ export class ProviderTextAttempt {
     if (this.finished) return;
     this.finished = true;
     clearTimeout(this.timer);
-    this.parent?.removeEventListener('abort', this.abort);
+    try {
+      this.parent?.removeEventListener('abort', this.abort);
+    } catch {
+      // Cleanup must still drain leases if a malformed transport signal throws.
+    }
     const dispose = (): void => {
       this.fragments.length = 0;
       this.budget.bytes -= this.bytes;
       this.bytes = 0;
+      this.admission?.release();
     };
     if (this.pending.size === 0) dispose();
-    else void Promise.allSettled([...this.pending]).then(dispose);
+    else {
+      this.admission?.retain();
+      void Promise.allSettled([...this.pending]).then(dispose);
+    }
   }
 }
 
 interface UncheckedResult {
   version?: number;
   ok?: boolean;
-  value?: { content?: string; replacements?: number; categories?: readonly { category?: string; count?: number }[] };
+  value?: {
+    content?: string;
+    replacements?: number;
+    categories?: readonly { category?: string; count?: number }[];
+  };
   error?: { code?: ProviderTextProtectionErrorCode };
 }
 
@@ -307,14 +454,26 @@ function validateResult(result: UncheckedResult | undefined): string {
     }
     if (!result.ok) {
       const code = result.error?.code;
-      throw new ProviderTextProtectionError(code != null && errorCodes.has(code) ? code : 'incompatible');
+      throw new ProviderTextProtectionError(
+        code != null && errorCodes.has(code) ? code : 'incompatible'
+      );
     }
     const value = result.value;
-    if (typeof value?.content !== 'string' || typeof value.replacements !== 'number' ||
-        !Number.isSafeInteger(value.replacements) || value.replacements < 0 ||
-        !Array.isArray(value.categories) || value.categories.length > 32 ||
-        value.categories.some((entry) => typeof entry.category !== 'string' ||
-          typeof entry.count !== 'number' || !Number.isSafeInteger(entry.count) || entry.count <= 0)) {
+    if (
+      typeof value?.content !== 'string' ||
+      typeof value.replacements !== 'number' ||
+      !Number.isSafeInteger(value.replacements) ||
+      value.replacements < 0 ||
+      !Array.isArray(value.categories) ||
+      value.categories.length > 32 ||
+      value.categories.some(
+        (entry) =>
+          typeof entry.category !== 'string' ||
+          typeof entry.count !== 'number' ||
+          !Number.isSafeInteger(entry.count) ||
+          entry.count <= 0
+      )
+    ) {
       throw new ProviderTextProtectionError('incompatible');
     }
     return value.content;

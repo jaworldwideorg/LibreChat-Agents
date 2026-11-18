@@ -1,6 +1,18 @@
-// src/utils/schema.ts
 import { zodToJsonSchema } from 'zod-to-json-schema';
-import type { ZodTypeAny } from 'zod';
+import { isZodSchemaV4 } from '@langchain/core/utils/types';
+import { globalRegistry, registry, toJSONSchema } from 'zod';
+import type { $ZodType, GlobalMeta } from 'zod/v4/core';
+import type { ZodTypeAny } from 'zod/v3';
+import type { ZodType } from 'zod';
+
+/** Schemas from another Zod installation keep their metadata in that installation's registry. */
+const schemaMetadata = registry<GlobalMeta>();
+schemaMetadata.get = (schema): GlobalMeta | undefined => {
+  const annotated = schema as $ZodType & Partial<Pick<ZodType, 'meta'>>;
+  return typeof annotated.meta === 'function'
+    ? annotated.meta()
+    : globalRegistry.get(schema);
+};
 
 /** Checks if a schema is a Zod schema by looking for the _def property */
 export function isZodSchema(schema: unknown): schema is ZodTypeAny {
@@ -18,6 +30,18 @@ export function toJsonSchema(
   name?: string,
   description?: string
 ): Record<string, unknown> {
+  if (isZodSchemaV4(schema)) {
+    return {
+      ...toJSONSchema(schema as $ZodType, {
+        target: 'draft-7',
+        io: 'input',
+        unrepresentable: 'any',
+        metadata: schemaMetadata,
+      }),
+      ...(name != null && name !== '' ? { title: name } : {}),
+      ...(description != null && description !== '' ? { description } : {}),
+    };
+  }
   if (isZodSchema(schema)) {
     const zodSchema = schema as ZodTypeAny & {
       describe: (desc: string) => ZodTypeAny;

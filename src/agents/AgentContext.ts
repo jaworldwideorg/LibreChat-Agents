@@ -472,6 +472,15 @@ export class AgentContext {
    * disturbing a `maxContextTokens` that no correction ever touched.
    */
   private _preOverflowMaxContextTokens?: number;
+  private correctedContextBudgetMode?: t.ContextBudgetMode;
+
+  get summarizationBudgetMode(): t.ContextBudgetMode {
+    return (
+      this.correctedContextBudgetMode ??
+      this.summarizationConfig?.contextBudgetMode ??
+      'input'
+    );
+  }
   /**
    * Prompt size, normalized into the local counter's uncalibrated units, at
    * the last overflow correction. Keeping both measurements in the same units
@@ -990,45 +999,47 @@ export class AgentContext {
         : 0;
     }
 
-    return markProviderTextInput(RunnableLambda.from((messages: BaseMessage[]) => {
-      const prefix: BaseMessage[] = systemMessage ? [systemMessage] : [];
+    return markProviderTextInput(
+      RunnableLambda.from((messages: BaseMessage[]) => {
+        const prefix: BaseMessage[] = systemMessage ? [systemMessage] : [];
 
-      // Build the non-system portion (summary + conversation), then apply
-      // cache markers separately so addCacheControl doesn't strip the
-      // SystemMessage's own cache_control breakpoint set above.
-      const hasSummaryBody =
-        this._summaryLocation === 'user_message' &&
-        this.summaryText != null &&
-        this.summaryText !== '';
+        // Build the non-system portion (summary + conversation), then apply
+        // cache markers separately so addCacheControl doesn't strip the
+        // SystemMessage's own cache_control breakpoint set above.
+        const hasSummaryBody =
+          this._summaryLocation === 'user_message' &&
+          this.summaryText != null &&
+          this.summaryText !== '';
 
-      const bodyWithSummary =
-        hasSummaryBody && promptCacheProvider == null
-          ? [this.buildSummaryHumanMessage(promptCacheProvider), ...messages]
-          : messages;
-      const dynamicTail = this.buildPromptCacheDynamicTail({
-        dynamicInstructions,
-        hasSummaryBody,
-        promptCacheProvider,
-        shouldMoveDynamicInstructions,
-      });
-      let body = this.buildBodyWithPromptCacheDynamicTail(
-        bodyWithSummary,
-        dynamicTail,
-        promptCacheProvider
-      );
-
-      if (
-        promptCacheProvider != null &&
-        dynamicTail.length === 0 &&
-        body.length >= 2
-      ) {
-        body = addTailCacheControl(
-          body,
-          this.getPromptCacheTtl(promptCacheProvider)
+        const bodyWithSummary =
+          hasSummaryBody && promptCacheProvider == null
+            ? [this.buildSummaryHumanMessage(promptCacheProvider), ...messages]
+            : messages;
+        const dynamicTail = this.buildPromptCacheDynamicTail({
+          dynamicInstructions,
+          hasSummaryBody,
+          promptCacheProvider,
+          shouldMoveDynamicInstructions,
+        });
+        let body = this.buildBodyWithPromptCacheDynamicTail(
+          bodyWithSummary,
+          dynamicTail,
+          promptCacheProvider
         );
-      }
-      return [...prefix, ...body];
-    })).withConfig({ runName: 'prompt' });
+
+        if (
+          promptCacheProvider != null &&
+          dynamicTail.length === 0 &&
+          body.length >= 2
+        ) {
+          body = addTailCacheControl(
+            body,
+            this.getPromptCacheTtl(promptCacheProvider)
+          );
+        }
+        return [...prefix, ...body];
+      })
+    ).withConfig({ runName: 'prompt' });
   }
 
   private buildSummaryHumanMessage(
@@ -1772,6 +1783,7 @@ export class AgentContext {
     }
     if (budgetTokens != null) {
       this.maxContextTokens = budgetTokens;
+      this.correctedContextBudgetMode = 'input';
     }
     this.pruneMessages = undefined;
     this.clearProviderProjection(true);
@@ -1981,6 +1993,7 @@ export class AgentContext {
     }
     this.maxContextTokens = this._preOverflowMaxContextTokens;
     this._preOverflowMaxContextTokens = undefined;
+    this.correctedContextBudgetMode = undefined;
     this._lastOverflowPromptTokens = undefined;
     this._overflowRecoveryAttempts = 0;
   }

@@ -74,7 +74,12 @@ export type AnthropicReasoning = {
 export type GoogleThinkingConfig = {
   thinkingBudget?: number;
   includeThoughts?: boolean;
-  thinkingLevel?: 'THINKING_LEVEL_UNSPECIFIED' | 'LOW' | 'MEDIUM' | 'HIGH';
+  thinkingLevel?:
+    | 'THINKING_LEVEL_UNSPECIFIED'
+    | 'LOW'
+    | 'MEDIUM'
+    | 'HIGH'
+    | 'XHIGH';
 };
 /** GPT-5.6 managed-request passthrough fields, shared by the OpenAI and
  *  Azure wrappers that both read them. */
@@ -153,7 +158,10 @@ export type BedrockAnthropicInput = ChatBedrockConverseInput &
   };
 export type BedrockConverseClientOptions = BedrockAnthropicInput;
 export type BedrockAnthropicClientOptions = BedrockAnthropicInput;
-export type GoogleClientOptions = GoogleGenerativeAIChatInput &
+export type GoogleClientOptions = Omit<
+  GoogleGenerativeAIChatInput,
+  'thinkingConfig'
+> &
   StreamSmoothingOptions & {
     customHeaders?: RequestOptions['customHeaders'];
     thinkingConfig?: GoogleThinkingConfig;
@@ -226,9 +234,13 @@ export type ProviderClientOptionsConfig =
       clientOptions: ClientOptions;
     };
 
+export type ContextBudgetMode = 'input' | 'window';
+
 export type FallbackConfig = ProviderClientOptionsConfig & {
   /** Context window used to corroborate ambiguous fallback overflow errors. */
   maxContextTokens?: number;
+  /** Applies to an explicit maxContextTokens; inherited ceilings retain their source units. */
+  contextBudgetMode?: ContextBudgetMode;
 };
 
 type LLMConfigFor<P extends CustomProviderName> = SharedLLMConfig<P> &

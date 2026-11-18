@@ -128,7 +128,8 @@ Referencing previous tool outputs:
 - Example (simple ASCII output): \`echo '{{tool0turn0}}' | jq '.foo'\` takes the full output of the first tool from the first turn and pipes it into jq.
 - For payloads that may contain quotes, parentheses, backticks, or arbitrary bytes (random/binary data, JSON with embedded quotes, multi-line strings), prefer a quoted-delimiter heredoc over \`echo '…'\`. The heredoc body is not interpreted by the shell, so substituted payloads pass through unchanged.
 - Heredoc example: \`wc -c << 'EOF'\\n{{tool0turn0}}\\nEOF\` (the quotes around \`'EOF'\` disable interpolation inside the body).
-- Unknown reference keys are left in place and surfaced as \`[unresolved refs: …]\` after the output.
+- A call that uses an unknown reference key is rejected before anything runs. The error names the unknown keys and lists the most recent available ones; correct the key or fetch the output again.
+- To pass a placeholder as literal text, prefix it with a backslash: \`\\{{tool0turn0}}\` reaches the tool as \`{{tool0turn0}}\` with no substitution. For a real backslash directly before a reference (for example a Windows path), double it: \`C:\\out\\\\{{tool0turn0}}\`.
 `.trim();
 
 /**
@@ -183,8 +184,14 @@ export function buildBashExecutionToolSchema(opts?: {
     );
   if (opts?.attachedWorkspace === true) {
     commandDescription = commandDescription
-      .replace('- Prior /mnt/data files are available and can be modified in place.\n', '')
-      .replace(CODE_ARTIFACT_PATH_GUIDANCE, ATTACHED_BASH_ARTIFACT_PATH_GUIDANCE);
+      .replace(
+        '- Prior /mnt/data files are available and can be modified in place.\n',
+        ''
+      )
+      .replace(
+        CODE_ARTIFACT_PATH_GUIDANCE,
+        ATTACHED_BASH_ARTIFACT_PATH_GUIDANCE
+      );
   }
   return {
     ...BashExecutionToolSchema,
@@ -204,7 +211,10 @@ function quoteBashArgument(value: string): string {
   return `'${value.replace(/'/g, '\'"\'"\'')}'`;
 }
 
-function commandWithArguments(command: string, args: string[] | undefined): string {
+function commandWithArguments(
+  command: string,
+  args: string[] | undefined
+): string {
   if (args == null || args.length === 0) return command;
   return `bash -c ${quoteBashArgument(command)} -- ${args.map(quoteBashArgument).join(' ')}`;
 }
@@ -374,9 +384,14 @@ function createBashExecutionTool(
           const response = await fetch(execEndpoint, fetchOptions);
           if (!response.ok) {
             throw new CodeApiRequestError(
-              await buildCodeApiHttpErrorMessage('POST', execEndpoint, response, {
-                profile: executionProfile,
-              })
+              await buildCodeApiHttpErrorMessage(
+                'POST',
+                execEndpoint,
+                response,
+                {
+                  profile: executionProfile,
+                }
+              )
             );
           }
           result = (await response.json()) as Partial<t.ExecuteResult> &
@@ -436,10 +451,7 @@ function createBashExecutionTool(
               outputWithWarnings,
               result.files
             )
-            : appendCodeSessionFileSummary(
-              outputWithWarnings,
-              result.files
-            ),
+            : appendCodeSessionFileSummary(outputWithWarnings, result.files),
           (hasFiles
             ? {
               session_id: result.session_id,
