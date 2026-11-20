@@ -1,4 +1,5 @@
 import type { ProviderTextProtection } from '@/protection/providerText';
+import type { AttachmentResolver } from './attachments';
 // src/types/graph.ts
 import type {
   BaseMessage,
@@ -410,6 +411,8 @@ export type ModelEndData =
 export type GraphTools = GenericTool[] | BindToolsInput[] | GoogleAIToolType[];
 export type StandardGraphInput = {
   providerTextProtection?: ProviderTextProtection;
+  /** Resolves attachments that messages carry by reference; see {@link AttachmentResolver}. */
+  resolveAttachment?: AttachmentResolver;
   runId?: string;
   signal?: AbortSignal;
   agents: AgentInputs[];
@@ -1001,6 +1004,12 @@ export interface LangfuseConfig {
    * from the run/message id, without a trace lookup. Default: random ids.
    */
   deterministicTraceId?: boolean;
+  /**
+   * Skills the agent can load with the `skill` tool, reported to Langfuse on
+   * the observations its run starts. `name` matches the tool's `skillName`;
+   * `version` is the skill's Langfuse version, when it has one.
+   */
+  skillsAvailable?: { name: string; version?: number }[];
 }
 
 interface AgentInputFields {
